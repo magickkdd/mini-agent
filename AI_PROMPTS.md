@@ -41,3 +41,16 @@
   异常恢复、最大轮次、重放恢复、trace 顺序）。
 - 冒烟：`python cli.py --help`、`import agent.runtime` + `schemas()` 列出 4 工具。
 - 真实 LLM 联调：设置环境变量后 REPL 手工验证（仓库不含 key，提交前 `grep -r sk-` 复查）。
+
+
+## 5. 真实 API 联调结果（2026-11-07）
+
+- 服务：OpenAI-compatible 第三方接入，模型 cn:deepseek-v4.1-flash（key 仅环境变量）。
+- 冒烟脚本 smoke_live.py 六项全部 PASS：纯对话 / calculator / todo / 追问带历史 / 独立 session / 隔离。
+- trace.jsonl 证据（live-chat 会话）：
+  - calculator：turn 0 模型发起 tool_call calculator({expr: "(12+8)*3"}) -> 执行 -> turn 1 回答 60——确认走真实工具调用而非心算；
+  - todo：turn 0 调 add 写入 -> turn 1 确认；追问轮模型主动调 list 核实后再回答（agentic 行为）；
+  - 每个任务恰好 2 次 LLM 调用（决策轮 + 回答轮），stop_reason/tool_calls 分支全部按设计工作；
+  - 独立 session 对天气问题诚实回答无该能力，且与 live-chat 无串话。
+- token 用量：input 6425 / output 676（约 7 次 LLM 调用）。
+- 未在真实链路触发的能力由单测覆盖：上下文压缩（阈值未到）、工具异常恢复、最大轮次。
