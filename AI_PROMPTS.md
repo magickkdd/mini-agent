@@ -54,3 +54,11 @@
   - 独立 session 对天气问题诚实回答无该能力，且与 live-chat 无串话。
 - token 用量：input 6425 / output 676（约 7 次 LLM 调用）。
 - 未在真实链路触发的能力由单测覆盖：上下文压缩（阈值未到）、工具异常恢复、最大轮次。
+
+
+## 6. 测试双模式改造（2026-11-07）
+
+- 需求：测试自动适配环境——未设置 OPENAI_API_KEY 时用 FakeLLM 剧本回放并提醒当前模式；设置后直接跑真模型。
+- 实现：conftest 探测环境变量，FakeLLM 夹具在有 key 时 pytest.skip，pytest_report_header 在报告头显示当前模式；新增 tests/test_live.py 五个真模型行为用例（断言放宽为结果级，不锁定措辞）。
+- 关键修正：真模型用例最初只断言"回答非空"，用无效 key 验证时发现 runtime 的 LLM 失败兜底字符串（LLM 调用失败: ...）也会让断言空转通过（假绿）——统一改为断言非空且非失败标记，无效 key 下 5 个用例全部响亮失败，符合预期。
+- 验证：无 key 12 passed + 5 skipped；无效 key 5 failed（无假绿）。

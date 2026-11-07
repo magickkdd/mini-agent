@@ -48,8 +48,10 @@ python cli.py --session work2   # 另开终端 = 窗口 2，与窗口 1 互不�
 ### 4. 测试
 
 ```sh
-python -m pytest -q        # 12 个用例，FakeLLM 剧本回放，零 token
+python -m pytest -q
 ```
+
+测试按环境自动切换：**未设置** `OPENAI_API_KEY` 时，LLM 用例以 FakeLLM 剧本回放运行（确定性、零 token，报告头会提醒当前模式）；**设置后**自动改为真模型行为测试（`tests/test_live.py`），工具级用例始终本地运行。
 
 ## 系统设计
 

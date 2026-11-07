@@ -3,6 +3,9 @@
 全部用 FakeLLM 剧本回放：确定性、零 token、CI 可跑。
 """
 import json
+import os
+
+import pytest
 
 import agent.runtime as runtime
 from agent.context import maybe_compact
@@ -135,6 +138,8 @@ def test_session_reload(fake, env):
 
 
 # 12. FakeLLM 剧本耗尽必须显性失败（防测试假绿）
+@pytest.mark.skipif(bool(os.environ.get("OPENAI_API_KEY")),
+                    reason="已提供 API：FakeLLM 内部行为用例跳过")
 def test_fake_llm_exhausted(env):
     f = FakeLLM()
     try:
