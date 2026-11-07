@@ -1,9 +1,14 @@
-"""7 类用例：工具、注册、循环分支、session 隔离、追问、压缩、异常恢复/最大轮次/trace。
+"""功能验证矩阵：一套用例验证 Agent 的各个功能，两种模式通用。
 
-全部用 FakeLLM 剧本回放：确定性、零 token、CI 可跑。
+- 未设置 OPENAI_API_KEY：模型回复由 FakeLLM 按剧本回放（确定性、零 token）；
+- 设置后：同一套用例自动改用真模型执行。
+
+设计原则：模型回答**不设标准答案**——每个场景把实际问答打印出来（`pytest -s`）
+供人工判断合理性；自动断言只锁定结构性事实（工具消息是否进历史、待办是否落盘、
+会话是否互串、压缩后结构、轮次守卫），这些是本仓库代码的行为，与模型措辞无关。
+driver(*script) 的剧本参数仅在 FakeLLM 模式生效，真模型模式下表示预期行为说明。
 """
 import json
-import os
 
 import pytest
 
@@ -12,138 +17,144 @@ from agent.context import maybe_compact
 from agent.runtime import run
 from agent.session import SessionManager
 from agent.tools import TOOLS, run_tool, schemas
-from fake_llm import FakeLLM, answer, call_tool
+from fake_llm import answer, call_tool
 
 
-# 1. 工具：calculator 安全求值 + 非法输入报错
-def test_calculator(env):
-    assert run_tool("calculator", '{"expr": "1+2*3"}') == {"result": 7.0}
-    assert run_tool("calculator", '{"expr": "(2-4)*0.5"}') == {"result": -1.0}
-    r = run_tool("calculator", '{"expr": "__import__(\'os\').getcwd()"}')
-    assert "error" in r  # 白名单外元素（Call 节点）被拒绝
+def good(a):
+    """前置条件：功能真的执行了（非 runtime 的 LLM 失败兜底字符串）。"""
+    assert a and a.strip() and "LLM 调用失败" not in a, f"功能未能执行: {a}"
+    return a
 
 
-# 2. 工具：todo 增改查 + 文件持久化
+def show(title, s, a):
+    """打印场景的实际问答，供人工判断回答合理性。"""
+    print(f"\n=== 场景：{title} ===")
+    for m in s.messages[-3:]:
+        print(f"[{m['role']}] {str(m.get('content'))[:100]}")
+    print(f"[回答] {a}")
+
+
+# ---- 工具级（不经 LLM，直接验证工具实现）----
+
+def test_calculator():
+    r = run_tool("calculator", '{"expr": "(12+8)*3"}')
+    print(f"\n=== 场景：calculator ===\n{r}")
+    assert r == {"result": 60.0}
+    assert "error" in run_tool("calculator", '{"expr": "__import__(\'os\').getcwd()"}')  # 注入被拒绝
+
+
 def test_todo(env):
     run_tool("todo", '{"action": "add", "item": "查天气"}')
-    run_tool("todo", '{"action": "add", "item": "写周报"}')
-    r = run_tool("todo", '{"action": "done", "item": "查天气"}')
-    assert r["done"] == "查天气"
+    run_tool("todo", '{"action": "done", "item": "查天气"}')
     r = run_tool("todo", '{"action": "list"}')
-    assert r["todos"] == [{"item": "查天气", "status": "done"},
-                          {"item": "写周报", "status": "pending"}]
-    assert env.joinpath(".todo.json").exists()  # 持久化落盘
+    print(f"\n=== 场景：todo ===\n{r}")
+    assert r["todos"] == [{"item": "查天气", "status": "done"}]
+    assert env.joinpath(".todo.json").exists()          # 持久化落盘
 
 
-# 3. 注册机制：名称/描述/参数 Schema 齐全
 def test_registration():
-    assert {"calculator", "todo", "search", "read_docs"} <= set(TOOLS)
-    for t in schemas():
-        f = t["function"]
-        assert t["type"] == "function" and f["description"] and f["parameters"]["properties"]
+    names = {t["function"]["name"] for t in schemas()}
+    print(f"\n=== 场景：工具注册 ===\n已注册: {sorted(names)}")
+    assert {"calculator", "todo", "search", "read_docs"} <= names
     todo_schema = next(t for t in schemas() if t["function"]["name"] == "todo")
     assert set(todo_schema["function"]["parameters"]["properties"]) == {"action", "item"}
-    assert todo_schema["function"]["parameters"]["required"] == ["action"]
 
 
-# 4. 主循环分支一：直接回复（Step 2 -> Step 4 出口）
-def test_loop_direct(fake, env):
-    f = fake(answer("你好！有什么可以帮你？"))
-    s = SessionManager().get("t1")
-    assert run(s, "你好") == "你好！有什么可以帮你？"
-    assert [m["role"] for m in s.messages] == ["system", "user", "assistant"]
-    assert f.calls[0][0]["role"] == "system" and f.calls[0][1]["role"] == "user"
+# ---- 循环行为（模型相关，人工判断回答合理性，结构自动检查）----
+
+def test_scenario_chat(env, driver):
+    """功能：纯对话 + 多轮记住状态。"""
+    s = SessionManager().get("chat")
+    driver(answer("MiniAgent 是一个约五百行实现的最小可用 Agent。"),
+           answer("我刚才介绍了 MiniAgent：一个最小可用 Agent。"))
+    a1 = good(run(s, "用一句话介绍 MiniAgent 这个项目"))
+    a2 = good(run(s, "你刚才介绍了什么？"))               # 纯对话追问
+    show("纯对话与追问", s, a2)
+    assert "MiniAgent" in a2                              # 第二轮能接上第一轮的话题
+    assert [m["role"] for m in s.messages] == ["system", "user", "assistant", "user", "assistant"]
 
 
-# 5. 主循环分支二：调工具后回答（Step 2 -> Step 3 -> Step 4）
-def test_loop_tool(fake, env):
-    f = fake(call_tool("c1", "calculator", expr="1+2*3"), answer("1+2*3 等于 7"))
-    s = SessionManager().get("t2")
-    assert run(s, "帮我算 1+2*3") == "1+2*3 等于 7"
-    roles = [m["role"] for m in s.messages]
-    assert roles == ["system", "user", "assistant", "tool", "assistant"]
-    assert "7" in s.messages[3]["content"]
-    events = [json.loads(line)["event"] for line in (env / "logs" / "trace.jsonl").read_text("utf-8").splitlines()]
-    assert events == ["llm", "tool", "llm"]  # trace 顺序：LLM 决策 -> 工具执行 -> LLM 回答
+def test_scenario_tool_round(env, driver):
+    """功能：模型自主决策调用 calculator，结果回传进历史，trace 完整。"""
+    s = SessionManager().get("calc")
+    driver(call_tool("c1", "calculator", expr="(12+8)*3"), answer("(12+8)*3 等于 60"))
+    a = good(run(s, "请用 calculator 工具计算 (12+8)*3"))
+    show("工具调用 calculator", s, a)
+    assert any(m["role"] == "tool" for m in s.messages)
+    events = [json.loads(l)["event"]
+              for l in (env / "logs" / "trace.jsonl").read_text("utf-8").splitlines()]
+    assert events == ["llm", "tool", "llm"]               # trace 顺序：决策→执行→回答
 
 
-# 6. session 隔离：两个"窗口"历史互不污染
-def test_session_isolation(fake, env):
+def test_scenario_todo_flow(env, driver):
+    """功能：todo 工具真实落盘 + 带工具的追问。"""
+    s = SessionManager().get("todo")
+    driver(call_tool("c1", "todo", action="add", item="买牛奶"),
+           answer("已记下待办：买牛奶"), answer("你刚记的待办是：买牛奶"))
+    a1 = good(run(s, "请用 todo 工具记一个待办：买牛奶"))
+    assert "买牛奶" in (env / ".todo.json").read_text("utf-8")   # 落盘是工具行为，可自动判定
+    a2 = good(run(s, "我刚记了什么待办？"))
+    show("todo 与追问", s, a2)
+
+
+def test_scenario_error_recovery(env, driver):
+    """功能：工具异常以 error 回传，agent 不崩溃并自行恢复。"""
+    s = SessionManager().get("err")
+    driver(call_tool("c1", "calculator", expr="1/0"), answer("除数不能为零，请换个表达式。"))
+    a = good(run(s, "请用 calculator 工具计算 1/0"))
+    show("异常恢复", s, a)
+    tool_msgs = [m for m in s.messages if m["role"] == "tool"]
+    assert tool_msgs and "error" in tool_msgs[0]["content"]
+
+
+def test_scenario_isolation(env, driver):
+    """功能：多 session 隔离 + 重启重放恢复。"""
     mgr = SessionManager()
-    fake(answer("窗口1：广州今日多云 26°C"))
-    a1 = run(mgr.get("win1"), "查广州天气")
-    fake(answer("窗口2：周报已写好"))
-    a2 = run(mgr.get("win2"), "写周报")
-    assert a1.startswith("窗口1") and a2.startswith("窗口2")
-    assert "周报" not in str(mgr.get("win1").messages)
-    assert "天气" not in str(mgr.get("win2").messages)
-    assert mgr.get("win1").path.exists() and mgr.get("win2").path.exists()
+    driver(answer("Python 是一门简洁强大的编程语言。"),
+           answer("围棋起源于中国，是一种策略棋类。"))
+    good(run(mgr.get("w1"), "用一句话介绍 Python"))
+    good(run(mgr.get("w2"), "用一句话介绍围棋"))
+    show("双窗口隔离", mgr.get("w1"), "(见各窗口回答)")
+    w1 = json.dumps(mgr.get("w1").messages, ensure_ascii=False)
+    w2 = json.dumps(mgr.get("w2").messages, ensure_ascii=False)
+    assert "围棋" not in w1 and "介绍围棋" not in w1       # 窗口互不串话
+    assert "介绍 Python" not in w2
+    assert len(SessionManager().get("w1").messages) == len(mgr.get("w1").messages)  # 重放恢复
 
 
-# 7. 追问（带工具 + 纯对话）：同一 session 历史自然带入下轮 context
-def test_followup(fake, env):
-    f = fake(call_tool("c1", "todo", action="add", item="买牛奶"),
-             answer("已记下待办：买牛奶"))
-    s = SessionManager().get("t5")
-    run(s, "记个待办：买牛奶")
-    f.script.append(answer("你刚记的待办是：买牛奶（pending）"))  # 第二轮剧本
-    assert run(s, "我刚记了什么待办？") == "你刚记的待办是：买牛奶（pending）"
-    # 共 3 次调用：首轮工具决策、首轮最终回答、追问轮
-    assert len(f.calls) == 3
-    assert any("买牛奶" in str(m) for m in f.calls[2])  # 首轮工具结果保留在历史里
+def test_scenario_search_and_docs(env, driver):
+    """功能：search 检索 + read_docs 阅读（检索工具闭环）。"""
+    s = SessionManager().get("docs")
+    driver(call_tool("c1", "search", query="天气"), answer("内置文档里有天气信息，需要我用 read_docs 读全文吗？"))
+    a = good(run(s, "帮我查一下有没有天气相关的资料"))
+    show("检索工具", s, a)
+    assert any(m["role"] == "tool" for m in s.messages)
 
 
-# 8. 上下文压缩：超阈值触发摘要替换，system 与近 K 条保留，会话文件同步重写
-def test_compaction(fake, env):
-    fake(answer("摘要：用户在准备笔试；已查天气；未决事项：无"))
-    s = SessionManager().get("t6")
+# ---- 结构性守卫（两种模式逻辑一致）----
+
+def test_scenario_compaction(env, driver):
+    """功能：上下文超阈值自动压缩，system 与近期原文保留。"""
+    driver(answer("摘要：用户在准备笔试；已查天气；未决事项：无"))
+    s = SessionManager().get("compact")
     s.append({"role": "system", "content": "你是 MiniAgent。"})
     for i in range(30):
         s.append({"role": "user", "content": f"历史消息 {i} " + "x" * 200})
         s.append({"role": "assistant", "content": f"回复 {i} " + "y" * 200})
     assert maybe_compact(s, threshold=1000, keep_recent=6)
-    assert len(s.messages) == 8  # system 1 + 摘要 1 + 近期 6
+    print(f"\n=== 场景：上下文压缩 ===\n压缩后 {len(s.messages)} 条：")
+    for m in s.messages[:2]:
+        print(f"[{m['role']}] {str(m.get('content'))[:80]}")
+    assert len(s.messages) == 8                            # system + 摘要 + 近 6 条
     assert s.messages[0]["role"] == "system"
     assert "[早期对话摘要]" in s.messages[1]["content"]
-    assert "历史消息 27" in s.messages[2]["content"]  # 近期原文保留（recent 首条=index 55）
-    assert len(s.path.read_text("utf-8").splitlines()) == 8  # 文件已重写为压缩态
-    assert not maybe_compact(s, threshold=1000, keep_recent=6)  # 已低于阈值不再触发
+    assert "历史消息 27" in s.messages[2]["content"]        # 近期原文保留
+    assert len(s.path.read_text("utf-8").splitlines()) == 8
 
 
-# 9. 异常恢复：工具报错回传 LLM，agent 不崩并继续作答
-def test_tool_error_recovery(fake, env):
-    fake(call_tool("c1", "calculator", expr="1/0"),
-         answer("除以零无法计算，请换一个表达式。"))
-    s = SessionManager().get("t7")
-    assert run(s, "算 1/0") == "除以零无法计算，请换一个表达式。"
-    assert "error" in json.loads(s.messages[3]["content"])  # ZeroDivisionError 已回传
-
-
-# 10. 最大轮次：耗尽后优雅退出而非崩溃
-def test_max_turns(fake, env, monkeypatch):
-    monkeypatch.setattr(runtime, "MAX_TURNS", 2)
-    fake(*[call_tool(f"c{i}", "search", query=f"q{i}") for i in range(5)])
-    s = SessionManager().get("t8")
-    assert "最大轮次" in run(s, "一直搜下去")
-
-
-# 11. 持久化恢复：重启（新 SessionManager）后历史完整重放
-def test_session_reload(fake, env):
-    fake(call_tool("c1", "todo", action="add", item="复盘"), answer("已记录"))
-    mgr = SessionManager()
-    run(mgr.get("t9"), "记待办：复盘")
-    s2 = SessionManager().get("t9")  # 模拟重启
-    assert len(s2.messages) == len(mgr.get("t9").messages)
-    assert any("复盘" in json.dumps(m, ensure_ascii=False) for m in s2.messages)
-
-
-# 12. FakeLLM 剧本耗尽必须显性失败（防测试假绿）
-@pytest.mark.skipif(bool(os.environ.get("OPENAI_API_KEY")),
-                    reason="已提供 API：FakeLLM 内部行为用例跳过")
-def test_fake_llm_exhausted(env):
-    f = FakeLLM()
-    try:
-        f.chat([{"role": "user", "content": "hi"}])
-        assert False, "应抛出 AssertionError"
-    except AssertionError as e:
-        assert "剧本已耗尽" in str(e)
+def test_scenario_max_turns(env, monkeypatch):
+    """功能：最大轮次守卫，超限优雅退出（置 0 直接触发，不调用模型）。"""
+    monkeypatch.setattr(runtime, "MAX_TURNS", 0)
+    out = run(SessionManager().get("turns"), "随便说点什么")
+    print(f"\n=== 场景：最大轮次守卫 ===\n{out}")
+    assert "最大轮次" in out

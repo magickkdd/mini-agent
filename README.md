@@ -45,13 +45,17 @@ python cli.py --session work2   # 另开终端 = 窗口 2，与窗口 1 互不�
 - 内置工具：`calculator`（AST 白名单安全求值）、`todo`（待办清单，存 `.todo.json`）、`search` / `read_docs`（内置文档检索，mock 数据）。
 - 可选变量：`AGENT_MAX_TURNS`（单任务最大轮数，默认 20）、`AGENT_COMPACT_THRESHOLD`（上下文压缩阈值，默认 3000）。
 
-### 4. 测试
+### 4. 功能验证
 
 ```sh
-python -m pytest -q
+python -m pytest -s -q    # -s 打印每个场景的实际问答，供人工判断回答合理性
 ```
 
-测试按环境自动切换：**未设置** `OPENAI_API_KEY` 时，LLM 用例以 FakeLLM 剧本回放运行（确定性、零 token，报告头会提醒当前模式）；**设置后**自动改为真模型行为测试（`tests/test_live.py`），工具级用例始终本地运行。
+一套功能验证矩阵（11 个场景）覆盖全部功能：calculator / todo / 工具注册 / 纯对话与追问 / 工具轮与 trace / todo 落盘与追问 / 异常恢复 / 多 session 隔离与重放 / 检索工具 / 上下文压缩 / 最大轮次守卫。
+
+- 模型回答**不设标准答案**：场景把实际问答打印出来供人工判断合理性；
+- 自动断言只锁定结构性事实（工具消息进历史、待办落盘、会话互不串、压缩后结构、轮次守卫）——这些是本仓库代码的行为，与模型措辞无关；
+- 模式自动切换：未设置 `OPENAI_API_KEY` 时回复由 FakeLLM 按剧本回放（确定性、零 token，报告头提醒）；设置后同一套用例自动改用真模型执行。
 
 ## 系统设计
 
