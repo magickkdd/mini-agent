@@ -1,24 +1,17 @@
-"""公共夹具：落盘路径指向临时目录；按是否设置 OPENAI_API_KEY 决定模型相关用例去留。
-
-- 设置了 key：全部用例直接跑真模型；
-- 未设置 key：模型相关用例（标记 @needs_llm）自动跳过，报告头提醒；工具级用例照常运行。
-"""
+"""公共夹具：落盘路径指向临时目录；未设置 OPENAI_API_KEY 时提醒并直接退出。"""
 import os
 
 import pytest
 
 from agent import session as session_mod, tools, trace
 
-HAS_KEY = bool(os.environ.get("OPENAI_API_KEY"))
 
-needs_llm = pytest.mark.skipif(not HAS_KEY, reason="未设置 OPENAI_API_KEY：模型相关用例跳过")
-
-
-def pytest_report_header(config):
-    if HAS_KEY:
-        return "已检测到 OPENAI_API_KEY：全部用例使用真模型执行"
-    return ("[提示] 未检测到 OPENAI_API_KEY：模型相关用例已跳过"
-            "（设置环境变量后同一套用例将直接跑真模型）")
+def pytest_configure(config):
+    if not os.environ.get("OPENAI_API_KEY"):
+        pytest.exit("[提示] 未检测到 OPENAI_API_KEY，测试退出。\n"
+                    "请先在环境变量中设置 OPENAI_API_KEY"
+                    "（可选 OPENAI_BASE_URL / AGENT_MODEL），然后重跑本命令。",
+                    returncode=0)
 
 
 @pytest.fixture

@@ -1,23 +1,16 @@
-"""功能验证矩阵：一套用例验证 Agent 的各个功能。
+"""功能验证矩阵：一套用例验证 Agent 的各个功能（需设置 OPENAI_API_KEY）。
 
-- 标记 @needs_llm 的用例直接跑真模型（需设置 OPENAI_API_KEY，未设置自动跳过）；
-- 模型回答**不设标准答案**——每个场景把实际问答打印出来（`pytest -s`）供人工判断
-  合理性；自动断言只锁定结构性事实（工具消息是否进历史、待办是否落盘、会话是否
-  互串、压缩后结构、轮次守卫），这些是本仓库代码的行为，与模型措辞无关。
+模型回答**不设标准答案**——每个场景把实际问答打印出来（`pytest -s`）供人工判断
+合理性；自动断言只锁定结构性事实（工具消息是否进历史、待办是否落盘、会话是否
+互串、压缩后结构、轮次守卫），这些是本仓库代码的行为，与模型措辞无关。
 """
 import json
-import os
-
-import pytest
 
 import agent.runtime as runtime
 from agent.context import maybe_compact
 from agent.runtime import run
 from agent.session import SessionManager
 from agent.tools import TOOLS, run_tool, schemas
-
-HAS_KEY = bool(os.environ.get("OPENAI_API_KEY"))
-needs_llm = pytest.mark.skipif(not HAS_KEY, reason="未设置 OPENAI_API_KEY：模型相关用例跳过")
 
 
 def good(a):
@@ -34,7 +27,7 @@ def show(title, s, a):
     print(f"[回答] {a}")
 
 
-# ---- 工具级（不经 LLM，无需 key）----
+# ---- 工具级（不经 LLM）----
 
 def test_calculator():
     r = run_tool("calculator", '{"expr": "(12+8)*3"}')
@@ -60,9 +53,8 @@ def test_registration():
     assert set(todo_schema["function"]["parameters"]["properties"]) == {"action", "item"}
 
 
-# ---- 循环行为（直接跑真模型，回答人工判断，结构自动检查）----
+# ---- 循环行为（真模型，回答人工判断，结构自动检查）----
 
-@needs_llm
 def test_conversation_and_followup(env):
     """功能：纯对话 + 多轮记住状态。"""
     s = SessionManager().get("chat")
@@ -72,7 +64,6 @@ def test_conversation_and_followup(env):
     assert [m["role"] for m in s.messages] == ["system", "user", "assistant", "user", "assistant"]
 
 
-@needs_llm
 def test_tool_round_and_trace(env):
     """功能：模型自主决策调用 calculator，结果回传进历史，trace 完整。"""
     s = SessionManager().get("calc")
@@ -84,7 +75,6 @@ def test_tool_round_and_trace(env):
     assert events == ["llm", "tool", "llm"]               # trace 顺序：决策→执行→回答
 
 
-@needs_llm
 def test_todo_flow(env):
     """功能：todo 工具真实落盘 + 带工具的追问。"""
     s = SessionManager().get("todo")
@@ -94,7 +84,6 @@ def test_todo_flow(env):
     show("todo 与追问", s, a2)
 
 
-@needs_llm
 def test_error_recovery(env):
     """功能：工具异常以 error 回传，agent 不崩溃并自行恢复。"""
     s = SessionManager().get("err")
@@ -104,7 +93,6 @@ def test_error_recovery(env):
     assert tool_msgs and "error" in tool_msgs[0]["content"]
 
 
-@needs_llm
 def test_session_isolation(env):
     """功能：多 session 隔离 + 重启重放恢复。"""
     mgr = SessionManager()
@@ -118,7 +106,6 @@ def test_session_isolation(env):
     assert len(SessionManager().get("w1").messages) == len(mgr.get("w1").messages)  # 重放恢复
 
 
-@needs_llm
 def test_scenario_search_and_docs(env):
     """功能：search 检索 + read_docs 阅读（检索工具闭环）。"""
     s = SessionManager().get("docs")
@@ -127,11 +114,10 @@ def test_scenario_search_and_docs(env):
     assert any(m["role"] == "tool" for m in s.messages)
 
 
-# ---- 结构性守卫（不调用模型，无需 key）----
+# ---- 结构性守卫 ----
 
-@needs_llm
 def test_scenario_compaction(env):
-    """功能：上下文超阈值自动压缩，system 与近期原文保留（摘要由当前配置的模型生成）。"""
+    """功能：上下文超阈值自动压缩，system 与近期原文保留（摘要由当前模型生成）。"""
     s = SessionManager().get("compact")
     s.append({"role": "system", "content": "你是 MiniAgent。"})
     for i in range(30):
