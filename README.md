@@ -2,7 +2,7 @@
 
 从零实现的最小可用 Agent（约 520 行，不依赖任何 agent 框架），stop-reason 驱动主循环，兼容 GLM / 豆包 / DeepSeek 等一切 OpenAI-compatible 服务。
 
-架构设计题作答（按要求每模块选一题）：[ARCHITECTURE.txt](ARCHITECTURE.txt)
+笔试第 2 题（架构设计题，每模块选一题）解答：[第2题-架构设计题解答.txt](第2题-架构设计题解答.txt)
 
 ## 快速开始
 
