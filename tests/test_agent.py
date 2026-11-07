@@ -56,12 +56,14 @@ def test_registration():
 # ---- 循环行为（真模型，回答人工判断，结构自动检查）----
 
 def test_conversation_and_followup(env):
-    """功能：纯对话 + 多轮记住状态。"""
+    """功能：纯对话 + 多轮记住状态（模型可自主决定是否调工具，不锁定消息序列）。"""
     s = SessionManager().get("chat")
     a1 = good(run(s, "用一句话介绍 MiniAgent 这个项目"))
     a2 = good(run(s, "你刚才介绍了什么？"))               # 纯对话追问
     show("纯对话与追问", s, a2)
-    assert [m["role"] for m in s.messages] == ["system", "user", "assistant", "user", "assistant"]
+    assert "MiniAgent" in a2                              # 第二轮能接上第一轮的话题
+    assert s.messages[0]["role"] == "system" and s.messages[-1]["role"] == "assistant"
+    assert sum(1 for m in s.messages if m["role"] == "user") == 2   # 两次输入都进了历史
 
 
 def test_tool_round_and_trace(env):
