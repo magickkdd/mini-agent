@@ -45,11 +45,10 @@ python cli.py --session work2   # 另开终端 = 窗口 2，与窗口 1 互不�
 - 内置工具：`calculator`（AST 白名单安全求值）、`todo`（待办清单，存 `.todo.json`）、`search` / `read_docs`（内置文档检索，mock 数据）。
 - 可选变量：`AGENT_MAX_TURNS`（单任务最大轮数，默认 20）、`AGENT_COMPACT_THRESHOLD`（上下文压缩阈值，默认 3000）。
 
-### 4. 测试与冒烟
+### 4. 测试
 
 ```sh
 python -m pytest -q        # 12 个用例，FakeLLM 剧本回放，零 token
-python smoke_live.py       # 真实 API 冒烟：五项链路检查
 ```
 
 ## 系统设计
