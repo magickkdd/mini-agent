@@ -1,14 +1,12 @@
-"""功能验证矩阵：一套用例验证 Agent 的各个功能，两种模式通用。
+"""功能验证矩阵：一套用例验证 Agent 的各个功能。
 
-- 未设置 OPENAI_API_KEY：模型回复由 FakeLLM 按剧本回放（确定性、零 token）；
-- 设置后：同一套用例自动改用真模型执行。
-
-设计原则：模型回答**不设标准答案**——每个场景把实际问答打印出来（`pytest -s`）
-供人工判断合理性；自动断言只锁定结构性事实（工具消息是否进历史、待办是否落盘、
-会话是否互串、压缩后结构、轮次守卫），这些是本仓库代码的行为，与模型措辞无关。
-driver(*script) 的剧本参数仅在 FakeLLM 模式生效，真模型模式下表示预期行为说明。
+- 标记 @needs_llm 的用例直接跑真模型（需设置 OPENAI_API_KEY，未设置自动跳过）；
+- 模型回答**不设标准答案**——每个场景把实际问答打印出来（`pytest -s`）供人工判断
+  合理性；自动断言只锁定结构性事实（工具消息是否进历史、待办是否落盘、会话是否
+  互串、压缩后结构、轮次守卫），这些是本仓库代码的行为，与模型措辞无关。
 """
 import json
+import os
 
 import pytest
 
@@ -17,7 +15,9 @@ from agent.context import maybe_compact
 from agent.runtime import run
 from agent.session import SessionManager
 from agent.tools import TOOLS, run_tool, schemas
-from fake_llm import answer, call_tool
+
+HAS_KEY = bool(os.environ.get("OPENAI_API_KEY"))
+needs_llm = pytest.mark.skipif(not HAS_KEY, reason="未设置 OPENAI_API_KEY：模型相关用例跳过")
 
 
 def good(a):
@@ -34,7 +34,7 @@ def show(title, s, a):
     print(f"[回答] {a}")
 
 
-# ---- 工具级（不经 LLM，直接验证工具实现）----
+# ---- 工具级（不经 LLM，无需 key）----
 
 def test_calculator():
     r = run_tool("calculator", '{"expr": "(12+8)*3"}')
@@ -60,24 +60,22 @@ def test_registration():
     assert set(todo_schema["function"]["parameters"]["properties"]) == {"action", "item"}
 
 
-# ---- 循环行为（模型相关，人工判断回答合理性，结构自动检查）----
+# ---- 循环行为（直接跑真模型，回答人工判断，结构自动检查）----
 
-def test_scenario_chat(env, driver):
+@needs_llm
+def test_conversation_and_followup(env):
     """功能：纯对话 + 多轮记住状态。"""
     s = SessionManager().get("chat")
-    driver(answer("MiniAgent 是一个约五百行实现的最小可用 Agent。"),
-           answer("我刚才介绍了 MiniAgent：一个最小可用 Agent。"))
     a1 = good(run(s, "用一句话介绍 MiniAgent 这个项目"))
     a2 = good(run(s, "你刚才介绍了什么？"))               # 纯对话追问
     show("纯对话与追问", s, a2)
-    assert "MiniAgent" in a2                              # 第二轮能接上第一轮的话题
     assert [m["role"] for m in s.messages] == ["system", "user", "assistant", "user", "assistant"]
 
 
-def test_scenario_tool_round(env, driver):
+@needs_llm
+def test_tool_round_and_trace(env):
     """功能：模型自主决策调用 calculator，结果回传进历史，trace 完整。"""
     s = SessionManager().get("calc")
-    driver(call_tool("c1", "calculator", expr="(12+8)*3"), answer("(12+8)*3 等于 60"))
     a = good(run(s, "请用 calculator 工具计算 (12+8)*3"))
     show("工具调用 calculator", s, a)
     assert any(m["role"] == "tool" for m in s.messages)
@@ -86,32 +84,30 @@ def test_scenario_tool_round(env, driver):
     assert events == ["llm", "tool", "llm"]               # trace 顺序：决策→执行→回答
 
 
-def test_scenario_todo_flow(env, driver):
+@needs_llm
+def test_todo_flow(env):
     """功能：todo 工具真实落盘 + 带工具的追问。"""
     s = SessionManager().get("todo")
-    driver(call_tool("c1", "todo", action="add", item="买牛奶"),
-           answer("已记下待办：买牛奶"), answer("你刚记的待办是：买牛奶"))
     a1 = good(run(s, "请用 todo 工具记一个待办：买牛奶"))
     assert "买牛奶" in (env / ".todo.json").read_text("utf-8")   # 落盘是工具行为，可自动判定
     a2 = good(run(s, "我刚记了什么待办？"))
     show("todo 与追问", s, a2)
 
 
-def test_scenario_error_recovery(env, driver):
+@needs_llm
+def test_error_recovery(env):
     """功能：工具异常以 error 回传，agent 不崩溃并自行恢复。"""
     s = SessionManager().get("err")
-    driver(call_tool("c1", "calculator", expr="1/0"), answer("除数不能为零，请换个表达式。"))
     a = good(run(s, "请用 calculator 工具计算 1/0"))
     show("异常恢复", s, a)
     tool_msgs = [m for m in s.messages if m["role"] == "tool"]
     assert tool_msgs and "error" in tool_msgs[0]["content"]
 
 
-def test_scenario_isolation(env, driver):
+@needs_llm
+def test_session_isolation(env):
     """功能：多 session 隔离 + 重启重放恢复。"""
     mgr = SessionManager()
-    driver(answer("Python 是一门简洁强大的编程语言。"),
-           answer("围棋起源于中国，是一种策略棋类。"))
     good(run(mgr.get("w1"), "用一句话介绍 Python"))
     good(run(mgr.get("w2"), "用一句话介绍围棋"))
     show("双窗口隔离", mgr.get("w1"), "(见各窗口回答)")
@@ -122,20 +118,20 @@ def test_scenario_isolation(env, driver):
     assert len(SessionManager().get("w1").messages) == len(mgr.get("w1").messages)  # 重放恢复
 
 
-def test_scenario_search_and_docs(env, driver):
+@needs_llm
+def test_scenario_search_and_docs(env):
     """功能：search 检索 + read_docs 阅读（检索工具闭环）。"""
     s = SessionManager().get("docs")
-    driver(call_tool("c1", "search", query="天气"), answer("内置文档里有天气信息，需要我用 read_docs 读全文吗？"))
     a = good(run(s, "帮我查一下有没有天气相关的资料"))
     show("检索工具", s, a)
     assert any(m["role"] == "tool" for m in s.messages)
 
 
-# ---- 结构性守卫（两种模式逻辑一致）----
+# ---- 结构性守卫（不调用模型，无需 key）----
 
-def test_scenario_compaction(env, driver):
-    """功能：上下文超阈值自动压缩，system 与近期原文保留。"""
-    driver(answer("摘要：用户在准备笔试；已查天气；未决事项：无"))
+@needs_llm
+def test_scenario_compaction(env):
+    """功能：上下文超阈值自动压缩，system 与近期原文保留（摘要由当前配置的模型生成）。"""
     s = SessionManager().get("compact")
     s.append({"role": "system", "content": "你是 MiniAgent。"})
     for i in range(30):
